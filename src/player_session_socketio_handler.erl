@@ -1,13 +1,15 @@
--module(socketio_demo_client_event).
+-module(player_session_socketio_handler).
+
 -behaviour(gen_event).
 
+-include("demo.hrl").
 -include("socketio.hrl").
 
 %% gen_event callbacks
 -export([init/1, handle_event/2, handle_call/2, 
          handle_info/2, terminate/2, code_change/3]).
 
--record(state, {}).
+-record(state, {socketio_client, player_session}).
 
 %%%===================================================================
 %%% gen_event callbacks
@@ -22,8 +24,9 @@
 %% @spec init(Args) -> {ok, State}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, #state{}}.
+init([SocketIoClient, PlayerSession]) ->
+    {ok, #state{socketio_client = SocketIoClient,
+                player_session = PlayerSession}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -38,14 +41,12 @@ init([]) ->
 %%                          remove_handler
 %% @end
 %%--------------------------------------------------------------------
-handle_event({message, Client, #msg{ content = Content } = Msg}, State) ->
-    io:format("Got a message: ~p from ~p~n",[Msg, Client]),
-    socketio_client:send(Client, #msg{ content = "hello!" }),
-    socketio_client:send(Client, #msg{ content = [{<<"echo">>, Content}], json = true}),
-    {ok, State};
+handle_event({send, Message}, #state{socketio_client = SocketIoClient} = _State) ->
+    gen_event:notify(SocketIoClient, Message),
+    {ok, _State};
 
-handle_event(_Event, State) ->
-    {ok, State}.
+handle_event(Event, _State) ->
+    {ok, _State}.
 
 %%--------------------------------------------------------------------
 %% @private

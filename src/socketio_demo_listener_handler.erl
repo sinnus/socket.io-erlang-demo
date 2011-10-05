@@ -1,4 +1,4 @@
--module(socketio_demo_listener_event).
+-module(socketio_demo_listener_handler).
 
 -behaviour(gen_event).
 
@@ -40,7 +40,7 @@ init([]) ->
 handle_event({client, Pid}, State) ->
     io:format("Connected: ~p~n",[Pid]),
     EventMgr = socketio_client:event_manager(Pid),
-    ok = gen_event:add_handler(EventMgr, socketio_demo_client_event, []),
+    ok = gen_event:add_handler(EventMgr, socketio_client_handler, []),
     {ok, State};
 
 handle_event({disconnect, Pid}, State) ->

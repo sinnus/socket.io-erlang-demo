@@ -1,9 +1,9 @@
--module(socketio_demo).
+-module(player_session_manager).
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/0, create_session/1, send_message/2, disconnect_player/1, event_manager/0]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -11,9 +11,8 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {socketio_server,
-                connection_manager_server
-               }).
+-record(state, {sessions,
+                event_manager}).
 
 %%%===================================================================
 %%% API
@@ -29,9 +28,21 @@
 start_link() ->
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
+create_session(PlayerId) ->
+    gen_server:call(?SERVER, {create_session, PlayerId}).
+
+send_message(PlayerId, Message) ->
+    gen_server:call(?SERVER, {send_message, PlayerId, Message}).
+
+disconnect_player(PlayerId) ->
+    gen_server:call(?SERVER, {disconnect_player, PlayerId}).
+
+event_manager() ->
+    gen_server:call(?SERVER, {event_manager}).
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -44,17 +55,10 @@ start_link() ->
 %% @end
 %%--------------------------------------------------------------------
 init([]) ->
-    {ok, SocketListener} = socketio_listener:start([{http_port, 8080}, 
-                                                    {default_http_handler, socketio_demo_http_handler}]),
-
-    EventMgr = socketio_listener:event_manager(SocketListener),
-    ok = gen_event:add_handler(EventMgr, socketio_demo_listener_handler, []),
-
-    {ok, _PlayerSessionManager} = player_session_manager:start_link(),
-    PlayerSessionEventManager = player_session_manager:event_manager(),
-    ok = gen_event:add_handler(PlayerSessionEventManager, chat_player_session_handler, []),
-
-    {ok, #state{socketio_server = SocketListener}}.
+    process_flag(trap_exit, true),
+    {ok, EventManager} = gen_event:start_link(),
+    {ok, #state{sessions = ets:new(player_sessions, [public]),
+                event_manager = EventManager}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -70,11 +74,54 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call({create_session, PlayerId}, _From, #state{event_manager = EventManager, sessions = Sessions} = State) ->
+    ExistedPid = get_session_by_player(Sessions, PlayerId),
+    case ExistedPid of
+        undefined ->
+            ok;
+        Pid ->
+            ets:delete(Sessions, Pid),
+            ets:delete(Sessions, PlayerId),
+            gen_event:notify(EventManager, {disconnect, PlayerId}),
+            player_session:disconnect_async(Pid),
+            ok
+    end,
+
+    {ok, NewSessionPid} = player_session:start_link(PlayerId),
+    %% Read about ets insert behaviour if row already exists
+    ets:insert(Sessions, [{PlayerId, NewSessionPid},
+                          {NewSessionPid, PlayerId}]),
+    gen_event:notify(EventManager, {connect, PlayerId, NewSessionPid}),
+    {reply, NewSessionPid, State};
+
+handle_call({send_message, PlayerId, Message}, _From, #state{sessions = Sessions} = State) ->
+    case get_session_by_player(Sessions, PlayerId) of
+        undefined ->
+            ok;
+        Pid ->
+            player_session:send_message(Pid, Message),
+            ok
+    end,
+    {reply, ok, State};
+
+handle_call({disconnect_player, PlayerId}, _From, #state{sessions = Sessions} = State) ->
+    case get_session_by_player(Sessions, PlayerId) of
+        undefined ->
+            ok;
+        Pid ->
+            player_session:disconnect(Pid),
+            ok
+    end,
+    {reply, ok, State};
+
+handle_call({event_manager}, _From, #state{event_manager = EventManager} = State) ->
+    {reply, EventManager, State};
+
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-%%-------------------------------------------------------
+%%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% Handling cast messages
@@ -97,6 +144,18 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({'EXIT', Pid, _}, #state{ event_manager = EventManager, sessions = Sessions } = State) ->
+    error_logger:info_msg("EXIT", []),
+    case ets:lookup(Sessions, Pid) of
+        [{Pid, PlayerId}] ->
+            ets:delete(Sessions, PlayerId),
+            ets:delete(Sessions, Pid),
+            gen_event:notify(EventManager, {disconnect, PlayerId});
+        _ ->
+            ignore
+    end,
+    {noreply, State};
+
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -128,3 +187,10 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+get_session_by_player(Sessions, PlayerId) ->
+    case ets:lookup(Sessions, PlayerId) of
+        [{PlayerId, Pid}] -> 
+            Pid;
+        _ ->
+            undefined
+    end.

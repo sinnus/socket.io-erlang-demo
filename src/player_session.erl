@@ -1,9 +1,9 @@
--module(socketio_demo).
+-module(player_session).
 
 -behaviour(gen_server).
 
 %% API
--export([start_link/0]).
+-export([start_link/1, disconnect_async/1, send_message/2, event_manager/1]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -11,9 +11,8 @@
 
 -define(SERVER, ?MODULE). 
 
--record(state, {socketio_server,
-                connection_manager_server
-               }).
+-record(state, {player_id,
+                event_manager}).
 
 %%%===================================================================
 %%% API
@@ -26,12 +25,21 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
+start_link(PlayerId) ->
+    gen_server:start_link(?MODULE, [PlayerId], []).
 
+disconnect_async(Pid) ->
+    gen_server:cast(Pid, disconnect).
+
+send_message(Pid, Message) ->
+    gen_server:cast(Pid, {send_message, Message}).
+
+event_manager(Pid) ->
+    gen_server:call(Pid, event_manager).
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
+
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
@@ -43,18 +51,10 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, SocketListener} = socketio_listener:start([{http_port, 8080}, 
-                                                    {default_http_handler, socketio_demo_http_handler}]),
-
-    EventMgr = socketio_listener:event_manager(SocketListener),
-    ok = gen_event:add_handler(EventMgr, socketio_demo_listener_handler, []),
-
-    {ok, _PlayerSessionManager} = player_session_manager:start_link(),
-    PlayerSessionEventManager = player_session_manager:event_manager(),
-    ok = gen_event:add_handler(PlayerSessionEventManager, chat_player_session_handler, []),
-
-    {ok, #state{socketio_server = SocketListener}}.
+init([PlayerId]) ->
+    {ok, EventManager} = gen_event:start_link(),
+    {ok, #state{player_id = PlayerId,
+                event_manager = EventManager}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -70,11 +70,17 @@ init([]) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(event_manager, _From, State) ->
+    {reply, State#state.event_manager, State};
+
+handle_call(disconnect, _From, _State) ->
+    {stop, normal, _State};
+
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.
 
-%%-------------------------------------------------------
+%%--------------------------------------------------------------------
 %% @private
 %% @doc
 %% Handling cast messages
@@ -84,6 +90,13 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_cast({send_message, Message} = SendMessage, #state{event_manager = EventManager} = State) ->
+    gen_event:cast(EventManager, SendMessage),
+    {noreply, State};
+
+handle_cast(disconnect, _State) ->
+    {stop, normal, _State};
+
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
